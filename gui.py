@@ -26,15 +26,39 @@ import time
 import urllib.request
 from pathlib import Path
 
+import webbrowser
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import classify_vault as cl   # for DEFAULT_BASE_URL
 import sort_vault as sv        # for the type-map / doc-map shown in the legend
 
+__version__ = "1.2"            # bumped per release; compared to the latest GitHub tag
+GITHUB_REPO = "MattTheCoder556/ChatSorter"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
 # Shown until the API key lists what it can actually use; the box stays editable
 # so any model id can be typed even if it's not in this list.
 CURATED_MODELS = ["MiniMax-M2", "MiniMax-M1", "MiniMax-M3"]
+
+
+def _vtuple(s: str) -> tuple:
+    """'v1.2' -> (1, 2); tolerant of junk so it never raises."""
+    parts = []
+    for p in s.strip().lstrip("vV").split("."):
+        digits = "".join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) or (0,)
+
+
+def latest_release_tag(timeout: int = 8) -> str:
+    """Latest release tag on GitHub (e.g. 'v1.2'), or '' on any failure."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json", "User-Agent": "ChatSorter"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8")).get("tag_name") or ""
 
 
 def fetch_models(api_key: str, base_url: str, timeout: int = 15) -> list:
@@ -128,16 +152,27 @@ class App:
         self._child = None               # Popen handle when WE started it (to reap)
         self._tail_stop = None           # Event that stops the log-tail thread
         self._model_result = None        # (kind, payload) handed back by the models thread
+        self._update_result = None       # newer release tag found by the update thread
+        self._update_shown = False
         self.q: queue.Queue = queue.Queue()
 
-        root.title("ChatSorter — vault organizer")
+        root.title(f"ChatSorter {__version__} — vault organizer")
         root.minsize(720, 680)
         PAD = {"padx": 10, "pady": (4, 0)}
 
-        ttk.Label(root, wraplength=690, foreground="#444",
-                  text="Files in the top level of your vault get filed into folders. "
-                       "Markdown notes are sorted by their type:, documents by file type. "
-                       "Nothing is ever deleted or overwritten.").pack(fill="x", **PAD)
+        # update banner — created hidden, shown only if a newer release exists
+        self.banner = ttk.Frame(root)
+        self._banner_lbl = ttk.Label(self.banner, foreground="#0a6")
+        self._banner_lbl.pack(side="left", padx=8)
+        ttk.Button(self.banner, text="Download",
+                   command=lambda: webbrowser.open(RELEASES_URL)).pack(side="left")
+
+        self._intro = ttk.Label(
+            root, wraplength=690, foreground="#444",
+            text="Files in the top level of your vault get filed into folders. "
+                 "Markdown notes are sorted by their type:, documents by file type. "
+                 "Nothing is ever deleted or overwritten.")
+        self._intro.pack(fill="x", **PAD)
 
         # ---- 1. vault ----
         box1 = ttk.LabelFrame(root, text=" 1. Vault folder ")
@@ -201,6 +236,7 @@ class App:
         self.poll_queue()
         if self.apikey.get().strip():    # a saved/env key -> list its models on open
             self._refresh_models()
+        self._check_update()             # quietly look for a newer release
 
     # ---------- legend ----------
     def _build_legend(self, parent):
@@ -224,6 +260,8 @@ class App:
         self.q.put(msg)
 
     def poll_queue(self):
+        if getattr(self, "_closing", False):
+            return                       # window is gone; stop rescheduling
         try:
             while True:
                 line = self.q.get_nowait()
@@ -233,6 +271,15 @@ class App:
                 self.out.configure(state="disabled")
         except queue.Empty:
             pass
+        # a newer release was found -> show the banner once (main thread)
+        if self._update_result is not None and not self._update_shown:
+            tag = self._update_result
+            self._update_result = None
+            self._update_shown = True
+            self._banner_lbl.configure(text=f"● Update available: {tag} "
+                                            f"(you have v{__version__})")
+            self.banner.pack(fill="x", padx=10, pady=(6, 0), before=self._intro)
+            self.log(f"a newer version is available: {tag}")
         # models fetched for the current key -> update the dropdown (main thread)
         if self._model_result is not None:
             kind, payload = self._model_result
@@ -318,6 +365,17 @@ class App:
         if not self.include_docs.get():
             flags.append("--no-docs")
         return flags
+
+    def _check_update(self):
+        """Background: compare the latest GitHub release to our version."""
+        def work():
+            try:
+                tag = latest_release_tag()
+                if tag and _vtuple(tag) > _vtuple(__version__):
+                    self._update_result = tag
+            except Exception:       # noqa: BLE001 - offline / rate-limited: stay silent
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _refresh_models(self):
         """List the models this API key can use and fill the dropdown (background)."""
@@ -458,6 +516,7 @@ class App:
             else:
                 self.stop_watch()
         self._persist()
+        self._closing = True
         self.root.destroy()
 
 

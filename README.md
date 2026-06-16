@@ -65,6 +65,10 @@ gitignored so it is never committed.) Leave the field blank to fall back to the
 `MINIMAX_API_KEY` env var. Untick **Use AI** to sort by existing `type:` /
 extension only, with no key at all.
 
+On launch the app quietly checks GitHub for a newer release; if one exists it shows
+an **"Update available"** banner with a **Download** button (it never auto-installs,
+just links you to the release). It fails silently when offline.
+
 **Model** is a dropdown. When you enter an API key (and on launch if one is
 saved), the app queries the provider's `/models` endpoint and fills the dropdown
 with the models that key can actually use — falling back to a built-in list if the
