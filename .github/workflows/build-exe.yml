@@ -9,6 +9,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write        # needed for the release step to create/upload a Release
+
 jobs:
   windows-exe:
     runs-on: windows-latest
