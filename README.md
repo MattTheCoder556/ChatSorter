@@ -32,13 +32,17 @@ remap it with `--doc-map pdf=Docs,xlsx=Sheets`.
 ## Get the app (standalone, no Python needed)
 A single double-click executable — no Python install required for end users.
 
-- **Windows `.exe`:** built automatically by GitHub Actions on every push to `main`.
-  Download it from the latest run under the repo's **Actions → build-exe → Artifacts
-  → `ChatSorter-windows`**, or grab it from a tagged **Release**. Then just
-  double-click `ChatSorter.exe`.
+- **Prebuilt downloads** (from the latest **Release**, or **Actions → build-exe →
+  Artifacts**):
+  - Windows: `ChatSorter.exe` — double-click, no Python needed.
+  - Linux x86-64: `ChatSorter-linux-x86_64` — `chmod +x` it, then run it. (Needs a
+    reasonably recent glibc; if it won't start, build locally instead.)
 - **Build it yourself:**
   - Windows: double-click `build.cmd` → `dist\ChatSorter.exe`
   - Linux/macOS: `./build.sh` → `dist/ChatSorter` (needs `python3-tk` on Linux)
+
+> Note: each executable only runs on the OS it was built for — the `.exe` is
+> Windows-only, the Linux binary is Linux-only. They are not interchangeable.
 
 Both bundle the GUI and all sub-tools into one file; the watcher runs by the exe
 re-invoking itself, so there are no loose `.py` files to ship.

@@ -38,9 +38,39 @@ jobs:
           name: ChatSorter-windows
           path: dist/ChatSorter.exe
 
-      - name: Attach to release (on tag)
+      - name: Attach exe to release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
-        run: gh release create "${{ github.ref_name }}" dist/ChatSorter.exe --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/ChatSorter.exe --generate-notes || gh release upload "${{ github.ref_name }}" dist/ChatSorter.exe --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
+
+  linux-bin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python + Tk + PyInstaller
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-venv
+          python3 -m pip install --user pyinstaller
+
+      - name: Build Linux binary
+        run: >
+          python3 -m PyInstaller --noconfirm --onefile --name ChatSorter-linux-x86_64
+          --hidden-import auto_sort --hidden-import watch_vault
+          --hidden-import classify_vault --hidden-import sort_vault
+          gui.py
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatSorter-linux
+          path: dist/ChatSorter-linux-x86_64
+
+      - name: Attach Linux binary to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create "${{ github.ref_name }}" dist/ChatSorter-linux-x86_64 --generate-notes || gh release upload "${{ github.ref_name }}" dist/ChatSorter-linux-x86_64 --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
