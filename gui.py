@@ -11,8 +11,9 @@ Python does (on Linux install the Tk binding once: the system `python3-tk` pkg).
 The watcher can either stop when you close the window (default) or keep running in
 the background if you tick "Keep watcher running after closing" — a detached
 process tracked by watcher.pid, so a later launch of this UI re-attaches to it and
-can stop it. Settings persist to config.json next to this file; the API key is read
-from MINIMAX_API_KEY (or the field) and is never saved to disk.
+can stop it. Settings persist to config.json next to this file, including the API
+key you type (stored in plaintext locally; config.json is gitignored so it is never
+committed). If the field is left blank, the MINIMAX_API_KEY env var is used.
 """
 import json
 import os
@@ -45,7 +46,7 @@ else:
     DETACH = {"start_new_session": True}
 
 DEFAULTS = {"vault": "", "model": "MiniMax-M2", "use_ai": True,
-            "include_docs": True, "keep_running": False}
+            "include_docs": True, "keep_running": False, "api_key": ""}
 
 
 def load_cfg() -> dict:
@@ -148,7 +149,8 @@ class App:
         self.model = tk.StringVar(value=self.cfg.get("model", "MiniMax-M2"))
         ttk.Entry(airow, textvariable=self.model, width=16).pack(side="left", padx=(4, 12))
         ttk.Label(airow, text="API key:").pack(side="left")
-        self.apikey = tk.StringVar(value=os.environ.get("MINIMAX_API_KEY", ""))
+        self.apikey = tk.StringVar(value=self.cfg.get("api_key")
+                                   or os.environ.get("MINIMAX_API_KEY", ""))
         ttk.Entry(airow, textvariable=self.apikey, width=22, show="•").pack(side="left", padx=4)
 
         # ---- 4. actions ----
@@ -256,7 +258,8 @@ class App:
                   "model": self.model.get().strip() or "MiniMax-M2",
                   "use_ai": bool(self.use_ai.get()),
                   "include_docs": bool(self.include_docs.get()),
-                  "keep_running": bool(self.keep_running.get())})
+                  "keep_running": bool(self.keep_running.get()),
+                  "api_key": self.apikey.get().strip()})
 
     def _valid_vault(self):
         v = self.vault.get().strip()

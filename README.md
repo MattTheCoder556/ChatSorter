@@ -40,10 +40,12 @@ activity log.
 # Linux:   ./gui.sh               (needs the Tk binding once: sudo apt install python3-tk)
 # macOS:   python3 gui.py
 ```
-The vault, model, and toggles persist to `config.json` next to the script — the
-single place every run reads its defaults from. The API key is taken from the
-`MINIMAX_API_KEY` env var (or the field in the window) and is never saved to disk.
-Untick **Use AI** to sort by existing `type:` / extension only, with no key at all.
+The vault, model, toggles, **and the API key you type** persist to `config.json`
+next to the script — the single place every run reads its defaults from, so you
+only enter the key once. (It's stored in plaintext locally; `config.json` is
+gitignored so it is never committed.) Leave the field blank to fall back to the
+`MINIMAX_API_KEY` env var. Untick **Use AI** to sort by existing `type:` /
+extension only, with no key at all.
 
 By default the watcher stops when you close the window. Tick **Keep watcher
 running after closing** to leave it running in the background as a detached
