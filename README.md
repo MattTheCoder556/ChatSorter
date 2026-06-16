@@ -65,6 +65,11 @@ gitignored so it is never committed.) Leave the field blank to fall back to the
 `MINIMAX_API_KEY` env var. Untick **Use AI** to sort by existing `type:` /
 extension only, with no key at all.
 
+**Model** is a dropdown. When you enter an API key (and on launch if one is
+saved), the app queries the provider's `/models` endpoint and fills the dropdown
+with the models that key can actually use — falling back to a built-in list if the
+call fails. The box stays editable, so you can still type any model id by hand.
+
 By default the watcher stops when you close the window. Tick **Keep watcher
 running after closing** to leave it running in the background as a detached
 process (tracked by `watcher.pid`); the next time you open the UI it re-attaches to

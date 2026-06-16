@@ -23,12 +23,28 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-import sort_vault as sv   # for the type-map / doc-map shown in the legend
+import classify_vault as cl   # for DEFAULT_BASE_URL
+import sort_vault as sv        # for the type-map / doc-map shown in the legend
+
+# Shown until the API key lists what it can actually use; the box stays editable
+# so any model id can be typed even if it's not in this list.
+CURATED_MODELS = ["MiniMax-M2", "MiniMax-M1", "MiniMax-M3"]
+
+
+def fetch_models(api_key: str, base_url: str, timeout: int = 15) -> list:
+    """Ask the provider (OpenAI-compatible /models) what this key can use."""
+    url = base_url.rstrip("/") + "/models"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    items = data.get("data") if isinstance(data, dict) else data
+    return [it["id"] for it in (items or []) if isinstance(it, dict) and it.get("id")]
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
@@ -111,6 +127,7 @@ class App:
         self.watcher_pid = None          # pid of the running watcher, if any
         self._child = None               # Popen handle when WE started it (to reap)
         self._tail_stop = None           # Event that stops the log-tail thread
+        self._model_result = None        # (kind, payload) handed back by the models thread
         self.q: queue.Queue = queue.Queue()
 
         root.title("ChatSorter — vault organizer")
@@ -149,13 +166,19 @@ class App:
                                    "(otherwise it stops with the app)",
                         variable=self.keep_running).pack(anchor="w", padx=8)
         airow = ttk.Frame(box3); airow.pack(fill="x", padx=8, pady=(2, 8))
-        ttk.Label(airow, text="Model:").pack(side="left")
-        self.model = tk.StringVar(value=self.cfg.get("model", "MiniMax-M2"))
-        ttk.Entry(airow, textvariable=self.model, width=16).pack(side="left", padx=(4, 12))
         ttk.Label(airow, text="API key:").pack(side="left")
         self.apikey = tk.StringVar(value=self.cfg.get("api_key")
                                    or os.environ.get("MINIMAX_API_KEY", ""))
-        ttk.Entry(airow, textvariable=self.apikey, width=22, show="•").pack(side="left", padx=4)
+        keyent = ttk.Entry(airow, textvariable=self.apikey, width=22, show="•")
+        keyent.pack(side="left", padx=(4, 12))
+        keyent.bind("<FocusOut>", lambda e: self._refresh_models())  # key entered -> list its models
+        ttk.Label(airow, text="Model:").pack(side="left")
+        self.model = tk.StringVar(value=self.cfg.get("model", "MiniMax-M2"))
+        saved = self.model.get()
+        vals = ([saved] if saved and saved not in CURATED_MODELS else []) + CURATED_MODELS
+        self.model_box = ttk.Combobox(airow, textvariable=self.model, width=18, values=vals)
+        self.model_box.pack(side="left", padx=4)
+        ttk.Button(airow, text="↻", width=2, command=self._refresh_models).pack(side="left")
 
         # ---- 4. actions ----
         box4 = ttk.Frame(root); box4.pack(fill="x", **PAD)
@@ -176,6 +199,8 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._reattach()        # pick up a watcher left running by a previous session
         self.poll_queue()
+        if self.apikey.get().strip():    # a saved/env key -> list its models on open
+            self._refresh_models()
 
     # ---------- legend ----------
     def _build_legend(self, parent):
@@ -208,6 +233,19 @@ class App:
                 self.out.configure(state="disabled")
         except queue.Empty:
             pass
+        # models fetched for the current key -> update the dropdown (main thread)
+        if self._model_result is not None:
+            kind, payload = self._model_result
+            self._model_result = None
+            if kind == "ok" and payload:
+                cur = self.model.get()
+                vals = ([cur] if cur and cur not in payload else []) + payload
+                self.model_box["values"] = vals
+                self.log(f"models for this key: {', '.join(payload)}")
+            elif kind == "ok":
+                self.log("the API returned no model list; keeping the current choices.")
+            else:
+                self.log(f"could not list models ({payload}); keeping the current choices.")
         # if the watcher we're tracking died on its own, reflect that
         if self._child is not None:
             if self._child.poll() is not None:        # our child exited
@@ -280,6 +318,21 @@ class App:
         if not self.include_docs.get():
             flags.append("--no-docs")
         return flags
+
+    def _refresh_models(self):
+        """List the models this API key can use and fill the dropdown (background)."""
+        key = self.apikey.get().strip()
+        if not key:
+            return
+        base = os.environ.get("MINIMAX_BASE_URL", cl.DEFAULT_BASE_URL)
+        self.log("fetching models for this API key…")
+
+        def work():
+            try:
+                self._model_result = ("ok", fetch_models(key, base))
+            except Exception as e:                       # noqa: BLE001 - report any failure
+                self._model_result = ("err", str(e))
+        threading.Thread(target=work, daemon=True).start()
 
     def _tool_cmd(self, tool: str, args: list) -> list:
         """Command to run a bundled sub-tool (auto_sort / watch_vault).
