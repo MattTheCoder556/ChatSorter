@@ -5,3 +5,8 @@ vaultwatch.log
 *.log
 config.json
 watcher.pid
+
+# PyInstaller build output
+build/
+dist/
+*.spec

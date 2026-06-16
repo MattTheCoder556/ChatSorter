@@ -29,6 +29,20 @@ Images are **deliberately not** moved (relocating them on disk breaks Obsidian
 embeds), nor is anything else. Turn document sorting off with `--no-docs`, or
 remap it with `--doc-map pdf=Docs,xlsx=Sheets`.
 
+## Get the app (standalone, no Python needed)
+A single double-click executable — no Python install required for end users.
+
+- **Windows `.exe`:** built automatically by GitHub Actions on every push to `main`.
+  Download it from the latest run under the repo's **Actions → build-exe → Artifacts
+  → `ChatSorter-windows`**, or grab it from a tagged **Release**. Then just
+  double-click `ChatSorter.exe`.
+- **Build it yourself:**
+  - Windows: double-click `build.cmd` → `dist\ChatSorter.exe`
+  - Linux/macOS: `./build.sh` → `dist/ChatSorter` (needs `python3-tk` on Linux)
+
+Both bundle the GUI and all sub-tools into one file; the watcher runs by the exe
+re-invoking itself, so there are no loose `.py` files to ship.
+
 ## Desktop UI (Windows + Linux + macOS)
 Prefer buttons over the command line? `gui.py` is a single cross-platform window
 (pure-stdlib Tkinter — no pip installs) that does everything: pick the vault, see a
@@ -176,6 +190,8 @@ it in a `[Service]` unit with `Restart=always` instead.
 |------|------|
 | `gui.py`           | **cross-platform desktop UI (Tkinter): sort / watch / log** |
 | `gui.cmd` / `gui.sh` | double-click launchers for the UI (Windows / Linux) |
+| `build.cmd` / `build.sh` | build a standalone ChatSorter.exe / binary (PyInstaller) |
+| `.github/workflows/build-exe.yml` | CI that builds the Windows .exe on every push |
 | `watch_vault.py`   | **watcher: auto-sorts files the instant they land** |
 | `auto_sort.py`     | one-shot entry point: classify → sort (interval task runs this) |
 | `classify_vault.py`| MiniMax M3 pass: writes `type:` onto untyped notes |

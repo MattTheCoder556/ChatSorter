@@ -36,11 +36,15 @@ PIDFILE = HERE / "watcher.pid"
 WATCH_LOG = HERE / "vaultwatch.log"
 PY = sys.executable or "python3"
 
-# Process-creation flags. On Windows: hide the console + make the watcher its own
-# detachable process group. On POSIX we pass start_new_session=True instead.
+FROZEN = getattr(sys, "frozen", False)   # True inside a PyInstaller .exe/binary
+
+# Process-creation flags. On Windows: CREATE_NO_WINDOW hides the console for the
+# one-shot sort; the detached watcher uses DETACHED_PROCESS | NEW_PROCESS_GROUP
+# (DETACHED_PROCESS already means "no console" — combining it with CREATE_NO_WINDOW
+# is invalid, so we don't). On POSIX we pass start_new_session=True instead.
 if sys.platform.startswith("win"):
-    NO_WINDOW = 0x08000000
-    DETACH = {"creationflags": NO_WINDOW | 0x00000200 | 0x00000008}  # NEW_PROCESS_GROUP|DETACHED
+    NO_WINDOW = 0x08000000                                    # CREATE_NO_WINDOW
+    DETACH = {"creationflags": 0x00000008 | 0x00000200}       # DETACHED_PROCESS | NEW_PROCESS_GROUP
 else:
     NO_WINDOW = 0
     DETACH = {"start_new_session": True}
@@ -277,6 +281,16 @@ class App:
             flags.append("--no-docs")
         return flags
 
+    def _tool_cmd(self, tool: str, args: list) -> list:
+        """Command to run a bundled sub-tool (auto_sort / watch_vault).
+
+        Normal run -> `python <tool>.py ...`. Frozen .exe -> re-invoke ourselves
+        with `--run=<tool>` (there is no separate interpreter or .py on disk).
+        """
+        if FROZEN:
+            return [sys.executable, f"--run={tool}", *args]
+        return [PY, str(HERE / f"{tool}.py"), *args]
+
     def _need_key_ok(self, what: str) -> bool:
         if self.use_ai.get() and not self._env().get("MINIMAX_API_KEY"):
             messagebox.showerror(
@@ -291,9 +305,10 @@ class App:
         vault = self._valid_vault()
         if not vault or not self._need_key_ok("To sort,"):
             return
-        cmd = [PY, str(HERE / "auto_sort.py"), vault] + self._common_flags()
+        args = [vault] + self._common_flags()
         if dry:
-            cmd.append("--dry-run")
+            args.append("--dry-run")
+        cmd = self._tool_cmd("auto_sort", args)
         self.log(f"$ {'PREVIEW ' if dry else ''}sort {vault}")
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -311,8 +326,8 @@ class App:
         vault = self._valid_vault()
         if not vault or not self._need_key_ok("To watch,"):
             return
-        cmd = [PY, str(HERE / "watch_vault.py"), vault,
-               "--interval", "5", "--log", "off"] + self._common_flags()
+        cmd = self._tool_cmd("watch_vault",
+                             [vault, "--interval", "5", "--log", "off"] + self._common_flags())
         # Detached + logging to a file, so it can outlive this window if asked.
         try:
             logf = open(WATCH_LOG, "a", encoding="utf-8")
@@ -394,6 +409,20 @@ class App:
 
 
 def main():
+    # Multi-tool dispatch: when frozen, the GUI re-invokes this same exe with
+    # `--run=auto_sort` / `--run=watch_vault` to run a sub-tool in a fresh process.
+    if len(sys.argv) > 1 and sys.argv[1].startswith("--run="):
+        tool = sys.argv[1].split("=", 1)[1]
+        del sys.argv[1]                      # let the sub-tool see a normal argv
+        if tool == "auto_sort":
+            import auto_sort
+            auto_sort.main()
+        elif tool == "watch_vault":
+            import watch_vault
+            watch_vault.main()
+        else:
+            sys.exit(f"unknown --run target: {tool}")
+        return
     root = tk.Tk()
     App(root)
     root.mainloop()

@@ -1,0 +1,43 @@
+name: build-exe
+
+# Builds a standalone Windows ChatSorter.exe on a real Windows runner (you can't
+# cross-build a Windows exe from Linux). Runs on every push to main and on demand;
+# tagging a release (v*) also attaches the exe to a GitHub Release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build ChatSorter.exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name ChatSorter
+          --hidden-import auto_sort --hidden-import watch_vault
+          --hidden-import classify_vault --hidden-import sort_vault
+          gui.py
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatSorter-windows
+          path: dist/ChatSorter.exe
+
+      - name: Attach to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create "${{ github.ref_name }}" dist/ChatSorter.exe --generate-notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
