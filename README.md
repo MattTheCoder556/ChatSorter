@@ -45,6 +45,12 @@ single place every run reads its defaults from. The API key is taken from the
 `MINIMAX_API_KEY` env var (or the field in the window) and is never saved to disk.
 Untick **Use AI** to sort by existing `type:` / extension only, with no key at all.
 
+By default the watcher stops when you close the window. Tick **Keep watcher
+running after closing** to leave it running in the background as a detached
+process (tracked by `watcher.pid`); the next time you open the UI it re-attaches to
+that watcher so you can see and stop it. (For a watcher with no UI at all, use
+`watch.sh` / the systemd timer.)
+
 ## Safety
 - Never deletes; only moves.
 - Never overwrites an existing `type:` — only adds one when missing.

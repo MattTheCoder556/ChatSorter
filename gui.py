@@ -8,15 +8,20 @@ Python does (on Linux install the Tk binding once: the system `python3-tk` pkg).
 
     python gui.py            # opens the window
 
-Settings (vault, model, options) persist to config.json next to this file. The
-API key is read from MINIMAX_API_KEY (or the field) and is never saved to disk.
+The watcher can either stop when you close the window (default) or keep running in
+the background if you tick "Keep watcher running after closing" — a detached
+process tracked by watcher.pid, so a later launch of this UI re-attaches to it and
+can stop it. Settings persist to config.json next to this file; the API key is read
+from MINIMAX_API_KEY (or the field) and is never saved to disk.
 """
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import tkinter as tk
@@ -26,10 +31,21 @@ import sort_vault as sv   # for the type-map / doc-map shown in the legend
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
+PIDFILE = HERE / "watcher.pid"
+WATCH_LOG = HERE / "vaultwatch.log"
 PY = sys.executable or "python3"
-NO_WINDOW = 0x08000000 if sys.platform.startswith("win") else 0  # hide child console on Windows
 
-DEFAULTS = {"vault": "", "model": "MiniMax-M2", "use_ai": True, "include_docs": True}
+# Process-creation flags. On Windows: hide the console + make the watcher its own
+# detachable process group. On POSIX we pass start_new_session=True instead.
+if sys.platform.startswith("win"):
+    NO_WINDOW = 0x08000000
+    DETACH = {"creationflags": NO_WINDOW | 0x00000200 | 0x00000008}  # NEW_PROCESS_GROUP|DETACHED
+else:
+    NO_WINDOW = 0
+    DETACH = {"start_new_session": True}
+
+DEFAULTS = {"vault": "", "model": "MiniMax-M2", "use_ai": True,
+            "include_docs": True, "keep_running": False}
 
 
 def load_cfg() -> dict:
@@ -49,22 +65,51 @@ def save_cfg(cfg: dict) -> None:
 
 
 def invert_doc_map(doc_map: dict) -> dict:
-    """{'.pdf':'Documents', ...} -> {'Documents': ['.pdf', ...]} preserving order."""
     out: dict = {}
     for ext, folder in doc_map.items():
         out.setdefault(folder, []).append(ext)
     return out
 
 
+def pid_alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        if sys.platform.startswith("win"):
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
+            if not h:
+                return False
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def kill_pid(pid: int) -> None:
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)  # whole session group
+    except (OSError, ProcessLookupError):
+        pass
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.cfg = load_cfg()
-        self.proc = None
+        self.watcher_pid = None          # pid of the running watcher, if any
+        self._child = None               # Popen handle when WE started it (to reap)
+        self._tail_stop = None           # Event that stops the log-tail thread
         self.q: queue.Queue = queue.Queue()
 
         root.title("ChatSorter — vault organizer")
-        root.minsize(720, 640)
+        root.minsize(720, 680)
         PAD = {"padx": 10, "pady": (4, 0)}
 
         ttk.Label(root, wraplength=690, foreground="#444",
@@ -80,7 +125,7 @@ class App:
         ttk.Entry(row, textvariable=self.vault).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="Browse…", command=self.browse).pack(side="left", padx=(6, 0))
 
-        # ---- 2. what goes where (legend) ----
+        # ---- 2. legend ----
         box2 = ttk.LabelFrame(root, text=" 2. What gets sorted where ")
         box2.pack(fill="both", expand=True, **PAD)
         self._build_legend(box2)
@@ -94,6 +139,10 @@ class App:
         self.use_ai = tk.BooleanVar(value=bool(self.cfg.get("use_ai", True)))
         ttk.Checkbutton(box3, text="Use AI to classify untyped notes (MiniMax — needs an API key)",
                         variable=self.use_ai).pack(anchor="w", padx=8)
+        self.keep_running = tk.BooleanVar(value=bool(self.cfg.get("keep_running", False)))
+        ttk.Checkbutton(box3, text="Keep watcher running after closing this window "
+                                   "(otherwise it stops with the app)",
+                        variable=self.keep_running).pack(anchor="w", padx=8)
         airow = ttk.Frame(box3); airow.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Label(airow, text="Model:").pack(side="left")
         self.model = tk.StringVar(value=self.cfg.get("model", "MiniMax-M2"))
@@ -119,6 +168,7 @@ class App:
         self.out.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._reattach()        # pick up a watcher left running by a previous session
         self.poll_queue()
 
     # ---------- legend ----------
@@ -129,15 +179,12 @@ class App:
         tree.column("#0", width=420, anchor="w")
         tree.column("dest", width=200, anchor="w")
         tree.pack(fill="both", expand=True, padx=8, pady=8)
-
         md = tree.insert("", "end", text="📝  Markdown notes — by  type:  frontmatter", open=True)
         for label, folder in sv.DEFAULT_MAP.items():
             tree.insert(md, "end", text=f"     type: {label}", values=(folder + "/",))
-
         doc = tree.insert("", "end", text="📄  Documents — by file extension", open=True)
         for folder, exts in invert_doc_map(sv.DEFAULT_DOC_MAP).items():
             tree.insert(doc, "end", text="     " + "  ".join(exts), values=(folder + "/",))
-
         tree.insert("", "end", text="🖼  Images, untyped notes, anything else",
                     values=("(left in place)",))
 
@@ -155,14 +202,40 @@ class App:
                 self.out.configure(state="disabled")
         except queue.Empty:
             pass
-        if self.proc is not None and self.proc.poll() is not None:
-            self._mark_stopped()
-        self.root.after(150, self.poll_queue)
+        # if the watcher we're tracking died on its own, reflect that
+        if self._child is not None:
+            if self._child.poll() is not None:        # our child exited
+                self.log("watcher stopped.")
+                self._clear_watcher()
+        elif self.watcher_pid is not None and not pid_alive(self.watcher_pid):
+            self.log("watcher stopped.")              # a re-attached watcher exited
+            self._clear_watcher()
+        self.root.after(200, self.poll_queue)
 
     def _stream(self, proc):
         for line in iter(proc.stdout.readline, ""):
             self.q.put(line.rstrip())
         proc.stdout.close()
+
+    def _start_tail(self):
+        """Tail WATCH_LOG into the log pane (the watcher logs to this file)."""
+        self._tail_stop = threading.Event()
+        stop = self._tail_stop
+
+        def run():
+            try:
+                f = open(WATCH_LOG, "r", encoding="utf-8", errors="ignore")
+            except OSError:
+                return
+            f.seek(0, os.SEEK_END)   # only show activity from now on
+            while not stop.is_set():
+                line = f.readline()
+                if line:
+                    self.q.put(line.rstrip())
+                else:
+                    time.sleep(0.3)
+            f.close()
+        threading.Thread(target=run, daemon=True).start()
 
     # ---------- shared ----------
     def browse(self):
@@ -182,7 +255,8 @@ class App:
         save_cfg({"vault": self.vault.get().strip(),
                   "model": self.model.get().strip() or "MiniMax-M2",
                   "use_ai": bool(self.use_ai.get()),
-                  "include_docs": bool(self.include_docs.get())})
+                  "include_docs": bool(self.include_docs.get()),
+                  "keep_running": bool(self.keep_running.get())})
 
     def _valid_vault(self):
         v = self.vault.get().strip()
@@ -209,20 +283,7 @@ class App:
             return False
         return True
 
-    def _spawn(self, cmd, track=False):
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1, env=self._env(),
-                                    creationflags=NO_WINDOW)
-        except OSError as e:
-            self.log(f"! failed to launch: {e}")
-            return None
-        if track:
-            self.proc = proc
-        threading.Thread(target=self._stream, args=(proc,), daemon=True).start()
-        return proc
-
-    # ---------- actions ----------
+    # ---------- one-shot sort ----------
     def sort_now(self, dry: bool):
         vault = self._valid_vault()
         if not vault or not self._need_key_ok("To sort,"):
@@ -231,40 +292,100 @@ class App:
         if dry:
             cmd.append("--dry-run")
         self.log(f"$ {'PREVIEW ' if dry else ''}sort {vault}")
-        self._spawn(cmd)
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env=self._env(),
+                                    creationflags=NO_WINDOW)
+        except OSError as e:
+            self.log(f"! failed to launch: {e}")
+            return
+        threading.Thread(target=self._stream, args=(proc,), daemon=True).start()
 
+    # ---------- watcher ----------
     def start_watch(self):
-        if self.proc is not None and self.proc.poll() is None:
+        if self.watcher_pid is not None and pid_alive(self.watcher_pid):
             return
         vault = self._valid_vault()
         if not vault or not self._need_key_ok("To watch,"):
             return
         cmd = [PY, str(HERE / "watch_vault.py"), vault,
                "--interval", "5", "--log", "off"] + self._common_flags()
-        if self._spawn(cmd, track=True) is None:
+        # Detached + logging to a file, so it can outlive this window if asked.
+        try:
+            logf = open(WATCH_LOG, "a", encoding="utf-8")
+            proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                    env=self._env(), **DETACH)
+            logf.close()
+        except OSError as e:
+            self.log(f"! failed to launch watcher: {e}")
             return
+        self._child = proc
+        self.watcher_pid = proc.pid
+        try:
+            PIDFILE.write_text(str(proc.pid), encoding="utf-8")
+        except OSError:
+            pass
+        self._start_tail()
+        self._set_running()
+
+    def stop_watch(self):
+        if self.watcher_pid is not None and pid_alive(self.watcher_pid):
+            kill_pid(self.watcher_pid)
+        if self._child is not None:        # reap our own child so it can't linger as a zombie
+            try:
+                self._child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._child.kill()
+        self.log("watcher stopped.")
+        self._clear_watcher()
+
+    def _reattach(self):
+        """If a previous session left a watcher running, re-adopt it."""
+        try:
+            pid = int(PIDFILE.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return
+        if pid_alive(pid):
+            self.watcher_pid = pid
+            self._start_tail()
+            self._set_running()
+            self.log(f"re-attached to background watcher (pid {pid}).")
+        else:
+            try:
+                PIDFILE.unlink()
+            except OSError:
+                pass
+
+    def _set_running(self):
         self.status.configure(text="● RUNNING", foreground="#0a0")
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
 
-    def stop_watch(self):
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self._mark_stopped()
-
-    def _mark_stopped(self):
-        self.proc = None
+    def _set_stopped(self):
         self.status.configure(text="● STOPPED", foreground="#b00")
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
 
+    def _clear_watcher(self):
+        if self._tail_stop is not None:
+            self._tail_stop.set()
+            self._tail_stop = None
+        self.watcher_pid = None
+        self._child = None
+        try:
+            PIDFILE.unlink()
+        except OSError:
+            pass
+        self._set_stopped()
+
     def on_close(self):
-        if self.proc is not None and self.proc.poll() is None:
-            self.stop_watch()
+        if self.watcher_pid is not None and pid_alive(self.watcher_pid):
+            if self.keep_running.get():
+                if self._tail_stop is not None:   # detach: leave it running, stop tailing
+                    self._tail_stop.set()
+                # PIDFILE stays so the next launch re-attaches.
+            else:
+                self.stop_watch()
         self._persist()
         self.root.destroy()
 

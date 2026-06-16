@@ -4,3 +4,4 @@ __pycache__/
 vaultwatch.log
 *.log
 config.json
+watcher.pid
