@@ -28,6 +28,17 @@ DEFAULT_KEEP = {
     "Welcome.md", "USAGE.md", "SYNTHESIS_REPORT.md", "README.md", "index.md",
 }
 
+# Documents are filed by extension (they can't carry a `type:`). Deterministic,
+# no LLM, no text extraction -> works for any file regardless of contents.
+# Images are intentionally NOT here: moving them on disk breaks Obsidian embeds.
+DEFAULT_DOC_MAP = {
+    ".pdf": "Documents", ".doc": "Documents", ".docx": "Documents",
+    ".odt": "Documents", ".rtf": "Documents", ".txt": "Documents",
+    ".ppt": "Presentations", ".pptx": "Presentations", ".odp": "Presentations",
+    ".xls": "Spreadsheets", ".xlsx": "Spreadsheets", ".csv": "Spreadsheets",
+    ".ods": "Spreadsheets",
+}
+
 
 def read_type(md: Path) -> str | None:
     """Pull the `type:` value from YAML frontmatter, if present."""
@@ -56,37 +67,65 @@ def parse_map(s: str) -> dict:
     return out
 
 
-def sort_root(root: Path, type_map: dict, keep: set, dry_run: bool = False,
-              files=None, on_move=None) -> int:
-    """Move root-level .md files into folders by type. Returns count moved.
+def parse_doc_map(s: str) -> dict:
+    """Parse 'pdf=Documents,xlsx=Spreadsheets' -> {'.pdf': 'Documents', ...}."""
+    out = {}
+    for k, v in parse_map(s).items():
+        ext = k if k.startswith(".") else "." + k
+        out[ext.lower()] = v
+    return out
 
-    If `files` is given (an iterable of Paths), only those are considered;
-    otherwise every root-level *.md is scanned. `on_move(name, folder)` is called
-    for each file actually moved (not in dry-run).
+
+def _root_targets(root: Path, doc_map: dict | None):
+    """Every root-level file we might sort: all *.md, plus doc extensions if on."""
+    names = {p for p in root.glob("*.md") if p.is_file()}
+    if doc_map:
+        for p in root.iterdir():
+            if p.is_file() and p.suffix.lower() in doc_map:
+                names.add(p)
+    return sorted(names)
+
+
+def sort_root(root: Path, type_map: dict, keep: set, dry_run: bool = False,
+              files=None, on_move=None, doc_map: dict | None = None) -> int:
+    """Move root-level files into folders. Returns count moved.
+
+    Markdown is filed by its `type:` frontmatter (via `type_map`); documents are
+    filed by extension (via `doc_map`, e.g. .pdf -> Documents). If `files` is given
+    only those are considered; otherwise every root-level *.md (plus doc extensions
+    when `doc_map` is set) is scanned. `on_move(name, folder)` fires per move.
     """
     moved = 0
-    targets = sorted(files) if files is not None else sorted(root.glob("*.md"))
-    for md in targets:  # root only, not recursive
-        if md.name in keep:
+    targets = sorted(files) if files is not None else _root_targets(root, doc_map)
+    for item in targets:  # root only, not recursive
+        if item.name in keep:
             continue
-        t = read_type(md)
-        folder = type_map.get(t)
+        suffix = item.suffix.lower()
+        if suffix == ".md":                       # note -> file by frontmatter type
+            t = read_type(item)
+            folder = type_map.get(t)
+            miss = f"type={t!r}"
+        elif doc_map and suffix in doc_map:        # document -> file by extension
+            folder = doc_map[suffix]
+            miss = f"ext={suffix}"
+        else:
+            continue                               # not a sortable file -> leave it
         if not folder:  # unknown/missing type -> leave it
-            print(f"skip {md.name} (type={t!r})")
+            print(f"skip {item.name} ({miss})")
             continue
         dest_dir = root / folder
-        dest = dest_dir / md.name
+        dest = dest_dir / item.name
         if dest.exists():  # don't clobber
-            print(f"skip {md.name} (already in {folder}/)")
+            print(f"skip {item.name} (already in {folder}/)")
             continue
         if dry_run:
-            print(f"WOULD move {md.name} -> {folder}/")
+            print(f"WOULD move {item.name} -> {folder}/")
         else:
             dest_dir.mkdir(exist_ok=True)
-            shutil.move(str(md), str(dest))
-            print(f"move {md.name} -> {folder}/")
+            shutil.move(str(item), str(dest))
+            print(f"move {item.name} -> {folder}/")
             if on_move:
-                on_move(md.name, folder)
+                on_move(item.name, folder)
         moved += 1
     return moved
 
@@ -98,6 +137,10 @@ def main():
                     help="comma list type=folder, e.g. concept=concepts,entity=entities")
     ap.add_argument("--keep", default=None,
                     help="comma list of filenames to never move (overrides default)")
+    ap.add_argument("--doc-map", type=parse_doc_map, default=DEFAULT_DOC_MAP,
+                    help="comma list ext=folder for documents, e.g. pdf=Docs,xlsx=Sheets")
+    ap.add_argument("--no-docs", action="store_true",
+                    help="sort Markdown only; leave pdf/docx/etc. in place")
     ap.add_argument("--dry-run", action="store_true", help="show moves without doing them")
     args = ap.parse_args()
 
@@ -106,7 +149,8 @@ def main():
         sys.exit(f"error: not a directory: {root}")
 
     keep = {x.strip() for x in args.keep.split(",")} if args.keep else DEFAULT_KEEP
-    moved = sort_root(root, args.map, keep, args.dry_run)
+    doc_map = None if args.no_docs else args.doc_map
+    moved = sort_root(root, args.map, keep, args.dry_run, doc_map=doc_map)
 
     verb = "would sort" if args.dry_run else "sorted"
     print(f"done: {verb} {moved} file(s)")

@@ -15,6 +15,36 @@ Two passes, run back to back:
 
 `auto_sort.py` runs both. A Windows Scheduled Task runs `auto_sort.py` on an interval.
 
+### Documents, not just notes
+The sort pass also files **documents by extension** (no LLM, no text extraction —
+works on any file):
+
+| extension | → folder |
+|---|---|
+| `.pdf .doc .docx .odt .rtf .txt` | `Documents/` |
+| `.ppt .pptx .odp` | `Presentations/` |
+| `.xls .xlsx .csv .ods` | `Spreadsheets/` |
+
+Images are **deliberately not** moved (relocating them on disk breaks Obsidian
+embeds), nor is anything else. Turn document sorting off with `--no-docs`, or
+remap it with `--doc-map pdf=Docs,xlsx=Sheets`.
+
+## Desktop UI (Windows + Linux + macOS)
+Prefer buttons over the command line? `gui.py` is a single cross-platform window
+(pure-stdlib Tkinter — no pip installs) that does everything: pick the vault, see a
+**legend of exactly what gets sorted where**, **Sort now** / **Preview (dry run)**,
+**Start/Stop watcher**, toggle **Include documents** and **Use AI**, with a live
+activity log.
+```bash
+# Windows: double-click gui.cmd   (or:  python gui.py)
+# Linux:   ./gui.sh               (needs the Tk binding once: sudo apt install python3-tk)
+# macOS:   python3 gui.py
+```
+The vault, model, and toggles persist to `config.json` next to the script — the
+single place every run reads its defaults from. The API key is taken from the
+`MINIMAX_API_KEY` env var (or the field in the window) and is never saved to disk.
+Untick **Use AI** to sort by existing `type:` / extension only, with no key at all.
+
 ## Safety
 - Never deletes; only moves.
 - Never overwrites an existing `type:` — only adds one when missing.
@@ -35,7 +65,22 @@ setx MINIMAX_MODEL   "MiniMax-M2"      # set to your exact M3 model id
 #   -> open a NEW terminal after setx so the values load.
 ```
 
+## Setup (Linux / macOS)
+The Python is cross-platform (stdlib only — no pip installs). Only the credentials
+and the scheduler differ from Windows.
+```bash
+# 1. python3 on PATH (python3 --version should work)
+
+# 2. Credentials as env vars (add to ~/.bashrc / ~/.zshrc to persist):
+export MINIMAX_API_KEY="your-key-here"
+export MINIMAX_MODEL="MiniMax-M2"      # set to your exact M3 model id
+# optional, only if your endpoint differs from the default:
+# export MINIMAX_BASE_URL="https://api.minimax.io/v1"
+```
+
 ## Try it before scheduling
+On Linux/macOS use `python3` and a POSIX path, e.g.
+`python3 auto_sort.py ~/knowledge-vault/wiki --dry-run`. The flags below are identical.
 ```powershell
 # preview only — calls the LLM but writes/moves nothing
 python auto_sort.py "C:\Users\Matt\knowledge-vault\wiki" --dry-run
@@ -79,11 +124,40 @@ Get-ScheduledTaskInfo -TaskName "VaultSort"                        # last result
 Unregister-ScheduledTask -TaskName "VaultSort" -Confirm:$false     # remove
 ```
 
+### Linux: interval timer (systemd user timer)
+`register_task.sh` is the Linux equivalent of `register_task.ps1`. It installs a
+**user** timer (no root) that runs `auto_sort.py` on an interval, copying your
+current shell's `MINIMAX_*` env vars into the unit.
+```bash
+chmod +x register_task.sh
+./register_task.sh ~/knowledge-vault/wiki --minutes 10            # classify + sort
+./register_task.sh ~/knowledge-vault/wiki --minutes 10 --no-llm   # sort only
+
+systemctl --user start vaultsort.service                          # test now
+systemctl --user list-timers vaultsort.timer                       # next runs
+journalctl --user -u vaultsort.service -f                          # follow logs
+systemctl --user disable --now vaultsort.timer                     # remove (then rm the unit files)
+```
+For the always-on watcher on Linux, the `watch.sh` / `stop.sh` / `status.sh`
+helpers mirror the Windows `.cmd` files:
+```bash
+chmod +x watch.sh stop.sh status.sh
+./watch.sh ~/knowledge-vault/wiki            # start in background (uses MINIMAX_API_KEY)
+./watch.sh ~/knowledge-vault/wiki --no-llm   # start, sort by existing type only
+./status.sh                                  # RUNNING/STOPPED + last 15 log lines
+./stop.sh                                    # stop it
+```
+Edit the `VAULT` default at the top of `watch.sh` so you can launch with no args.
+The watcher uses `notify-send` for desktop notifications; to survive logout, wrap
+it in a `[Service]` unit with `Restart=always` instead.
+
 ## Tuning
 - `--threshold 0.6` — minimum model confidence before a type is written. Raise it
   to be more conservative (more notes left in root), lower to classify more.
 - `--map note=notes,ref=references` — use a different type→folder convention. The
   map keys double as the allowed classification labels.
+- `--doc-map pdf=Docs,xlsx=Sheets` — change where documents go by extension.
+  `--no-docs` turns document sorting off entirely (Markdown only).
 - `--keep index.md,README.md` — filenames the pipeline never touches.
 - `--max-chars 6000` — how much of each note is sent to the model.
 - Edit `TYPE_HINTS` in `classify_vault.py` to refine how each type is described to
@@ -92,9 +166,14 @@ Unregister-ScheduledTask -TaskName "VaultSort" -Confirm:$false     # remove
 ## Files
 | file | role |
 |------|------|
+| `gui.py`           | **cross-platform desktop UI (Tkinter): sort / watch / log** |
+| `gui.cmd` / `gui.sh` | double-click launchers for the UI (Windows / Linux) |
 | `watch_vault.py`   | **watcher: auto-sorts files the instant they land** |
 | `auto_sort.py`     | one-shot entry point: classify → sort (interval task runs this) |
 | `classify_vault.py`| MiniMax M3 pass: writes `type:` onto untyped notes |
 | `sort_vault.py`    | deterministic mover: files notes by `type:` |
 | `register_watcher.ps1`| registers the always-on watcher task (at logon) |
-| `register_task.ps1`| registers the interval Scheduled Task |
+| `register_task.ps1`| registers the interval Scheduled Task (Windows) |
+| `register_task.sh` | registers the interval systemd **user** timer (Linux) |
+| `watch.cmd` / `stop.cmd` / `status.cmd` | start / stop / check the watcher (Windows) |
+| `watch.sh` / `stop.sh` / `status.sh` | start / stop / check the watcher (Linux/macOS) |

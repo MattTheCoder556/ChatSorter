@@ -34,6 +34,10 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="skip the LLM pass, sort only")
     ap.add_argument("--no-new", action="store_true",
                     help="don't invent new folders; leave unmatched notes in place")
+    ap.add_argument("--doc-map", type=sv.parse_doc_map, default=sv.DEFAULT_DOC_MAP,
+                    help="comma list ext=folder for documents, e.g. pdf=Docs,xlsx=Sheets")
+    ap.add_argument("--no-docs", action="store_true",
+                    help="sort Markdown only; leave pdf/docx/etc. in place")
     ap.add_argument("--dry-run", action="store_true", help="preview both passes, change nothing")
     args = ap.parse_args()
 
@@ -56,8 +60,9 @@ def main():
     else:
         print("== pass 1: skipped (--no-llm) ==")
 
-    print("== pass 2: sort by type ==")
-    moved = sv.sort_root(root, args.map, keep, args.dry_run)
+    print("== pass 2: sort notes by type + documents by extension ==")
+    doc_map = None if args.no_docs else args.doc_map
+    moved = sv.sort_root(root, args.map, keep, args.dry_run, doc_map=doc_map)
     verb = "would sort" if args.dry_run else "sorted"
     print(f"done: {verb} {moved} file(s)")
 

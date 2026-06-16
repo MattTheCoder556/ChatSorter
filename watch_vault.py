@@ -44,21 +44,33 @@ def log_line(logfile, msg):
 
 
 def notify(title, msg):
-    """Fire a Windows balloon notification; never let it disrupt the watcher."""
-    t = str(title).replace("'", "''")
-    m = str(msg).replace("'", "''")
-    ps = (
-        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
-        "$n=New-Object System.Windows.Forms.NotifyIcon;"
-        "$n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;"
-        f"$n.ShowBalloonTip(4000,'{t}','{m}','Info');"
-        "Start-Sleep -Milliseconds 4500;$n.Dispose()"
-    )
+    """Fire a desktop notification; never let it disrupt the watcher.
+
+    Uses `notify-send` on Linux, `osascript` on macOS, and a PowerShell balloon
+    tip on Windows. Any failure (tool missing, no desktop session) is swallowed.
+    """
     try:
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-            creationflags=CREATE_NO_WINDOW,
-        )
+        if sys.platform.startswith("linux"):
+            subprocess.Popen(["notify-send", str(title), str(msg)])
+        elif sys.platform == "darwin":
+            t = str(title).replace('"', '\\"')
+            m = str(msg).replace('"', '\\"')
+            subprocess.Popen(
+                ["osascript", "-e", f'display notification "{m}" with title "{t}"'])
+        else:  # Windows
+            t = str(title).replace("'", "''")
+            m = str(msg).replace("'", "''")
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+                "$n=New-Object System.Windows.Forms.NotifyIcon;"
+                "$n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;"
+                f"$n.ShowBalloonTip(4000,'{t}','{m}','Info');"
+                "Start-Sleep -Milliseconds 4500;$n.Dispose()"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                creationflags=CREATE_NO_WINDOW,
+            )
     except OSError:
         pass
 
@@ -80,17 +92,23 @@ def resolve_credentials(args):
     return api_key, base_url
 
 
-def signatures(root: Path, keep: set) -> dict:
-    """Map name -> (size, mtime_int) for root-level .md files, excluding keep-list."""
+def signatures(root: Path, keep: set, doc_map: dict | None = None) -> dict:
+    """Map name -> (size, mtime_int) for sortable root-level files (excl. keep-list).
+
+    Always watches *.md; also watches document extensions in `doc_map` when set.
+    """
     sigs = {}
-    for md in root.glob("*.md"):
-        if md.name in keep:
+    for f in root.iterdir():
+        if not f.is_file() or f.name in keep:
+            continue
+        suffix = f.suffix.lower()
+        if suffix != ".md" and not (doc_map and suffix in doc_map):
             continue
         try:
-            st = md.stat()
+            st = f.stat()
         except OSError:
             continue
-        sigs[md.name] = (st.st_size, int(st.st_mtime))
+        sigs[f.name] = (st.st_size, int(st.st_mtime))
     return sigs
 
 
@@ -108,6 +126,10 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="skip LLM, sort by existing type only")
     ap.add_argument("--no-new", action="store_true",
                     help="don't invent new folders; leave unmatched notes in the root")
+    ap.add_argument("--doc-map", type=sv.parse_doc_map, default=sv.DEFAULT_DOC_MAP,
+                    help="comma list ext=folder for documents, e.g. pdf=Docs,xlsx=Sheets")
+    ap.add_argument("--no-docs", action="store_true",
+                    help="watch Markdown only; leave pdf/docx/etc. in place")
     ap.add_argument("--ignore-existing", action="store_true",
                     help="treat files already in the root at startup as handled; "
                          "only act on notes that arrive or change after launch")
@@ -133,6 +155,7 @@ def main():
         sys.exit(f"error: not a directory: {root}")
 
     keep = {x.strip() for x in args.keep.split(",")} if args.keep else sv.DEFAULT_KEEP
+    doc_map = None if args.no_docs else args.doc_map
 
     api_key = None
     base_url = args.base_url
@@ -150,14 +173,14 @@ def main():
     # unless --ignore-existing, which pre-seeds the current root as "handled".
     seen: dict = {}
     if args.ignore_existing:
-        seen = signatures(root, keep)
+        seen = signatures(root, keep, doc_map)
         log_line(logfile, f"ignoring {len(seen)} pre-existing root file(s); "
                           "only new/changed notes will be sorted")
 
     while True:
         try:
             now = time.time()
-            cur = signatures(root, keep)
+            cur = signatures(root, keep, doc_map)
             new_files = []
             for name, sig in cur.items():
                 if seen.get(name) == sig:
@@ -171,10 +194,13 @@ def main():
                 log_line(logfile, f"detected {len(new_files)} new/changed: {', '.join(new_files)}")
                 targets = [root / n for n in new_files]
                 sort_map = args.map
-                if not args.no_llm:
+                # only Markdown gets the LLM type-classification pass; documents
+                # are filed by extension and never sent to the model.
+                md_targets = [t for t in targets if t.suffix.lower() == ".md"]
+                if not args.no_llm and md_targets:
                     _, used = cl.classify_root(root, args.map, keep, api_key=api_key,
                                                model=args.model, base_url=base_url,
-                                               threshold=args.threshold, files=targets,
+                                               threshold=args.threshold, files=md_targets,
                                                allow_new=not args.no_new)
                     for lbl, folder in used.items():
                         if lbl not in args.map and not (root / folder).exists():
@@ -186,8 +212,9 @@ def main():
                     if args.notify:
                         notify("Note filed", f"{name}  ->  {folder}")
 
-                # only sort the notes we just detected, never the whole backlog
-                moved = sv.sort_root(root, sort_map, keep, files=targets, on_move=on_move)
+                # only sort the files we just detected, never the whole backlog
+                moved = sv.sort_root(root, sort_map, keep, files=targets,
+                                     on_move=on_move, doc_map=doc_map)
                 if moved == 0:
                     log_line(logfile, "  (left in root — unclear type, low confidence)")
                 # Mark only the files we actually handled, using their pre-move
