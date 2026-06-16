@@ -1,0 +1,5 @@
+# runtime / generated
+__pycache__/
+*.pyc
+vaultwatch.log
+*.log
